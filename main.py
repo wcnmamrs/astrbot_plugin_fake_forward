@@ -13,7 +13,7 @@ from astrbot.api.event.filter import PermissionType
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-@register("fake_forward", "Jason.Joestar", "一个伪造转发消息的插件", "1.0.0", "插件仓库URL")
+@register("fake_forward", "wcnmamrs", "基于 SessionFaker 重构的伪造合并转发消息插件", "2.0.0", "https://github.com/wcnmamrs/astrbot_plugin_fake_forward")
 class NodeTestPlugin(Star):
     def __init__(self, context: Context, **kwargs):
         self.config = kwargs.get("config", {})
