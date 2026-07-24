@@ -1,0 +1,30 @@
+{
+  "admin_ids": {
+    "description": "可使用者 QQ 号列表（多个用逗号分隔，例如: 123456,789012）",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "api_token": {
+    "description": "远梦 API Token（用于获取 QQ 昵称）",
+    "type": "string",
+    "default": ""
+  },
+  "default_summary": {
+    "description": "合并转发消息的默认标题（外部卡片），命令中可覆盖",
+    "type": "string",
+    "default": "群聊的聊天记录"
+  },
+  "debug_mode": {
+    "description": "开启后打印详细调试日志（用于排查问题）",
+    "type": "bool",
+    "default": false
+  },
+  "timeout": {
+    "description": "媒体上传超时时间（秒），大文件可适当调大",
+    "type": "int",
+    "default": 120
+  }
+}

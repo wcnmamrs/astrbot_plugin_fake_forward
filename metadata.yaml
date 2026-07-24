@@ -1,0 +1,6 @@
+name: astrbot_plugin_fake_forward
+desc: astrbot_plugin_SessionFaker的重构版，更好的伪造转发
+help: 查看帮助获取使用说明。
+version: v2.0.0
+author:wcnmamrs
+repo:
