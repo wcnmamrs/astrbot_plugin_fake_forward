@@ -1,6 +1,7 @@
 name: astrbot_plugin_fake_forward
-desc: astrbot_plugin_SessionFaker的重构版，更好的伪造转发
-help: 查看帮助获取使用说明。
-version: v2.0.0
-author:wcnmamrs
-repo:
+desc: 基于 SessionFaker 重构的伪造合并转发消息插件，支持图片/视频分步发送、预览、回退、权限控制等完整功能。
+help: 输入 /伪造帮助 查看使用说明。
+version: 2.0.0
+author: wcnmamrs (重构版) / Jason.Joestar (原始代码)
+repo: https://github.com/wcnmamrs/astrbot_plugin_fake_forward
+docs: https://github.com/wcnmamrs/astrbot_plugin_fake_forward
