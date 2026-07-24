@@ -18,8 +18,6 @@ class NodeTestPlugin(Star):
     def __init__(self, context: Context, **kwargs):
         self.config = kwargs.get("config", {})
         super().__init__(context, **kwargs)
-        if not hasattr(self, 'config') or not self.config:
-            self.config = kwargs.get("config", {})
 
         self.admin_ids = self.config.get("admin_ids", [])
         self.api_token = self.config.get("api_token", "")
@@ -51,6 +49,9 @@ class NodeTestPlugin(Star):
                     self._log_debug(f"清理过期缓存: {fpath}")
                 except Exception:
                     pass
+
+        # 复用 aiohttp 会话
+        self.session = aiohttp.ClientSession()
 
         logger.info(f"[伪造插件] 缓存目录: {self.cache_dir}")
         logger.info(f"[伪造插件] 临时目录: {self.temp_dir}")
@@ -107,16 +108,15 @@ class NodeTestPlugin(Star):
         last_error = None
         for attempt in range(1, 4):
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, headers=headers, timeout=5) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            if data.get("success") and "data" in data:
-                                nickname = data["data"].get("name", "")
-                                if nickname:
-                                    self.nick_cache[qq_number] = nickname
-                                    self._nick_cache_time[qq_number] = time.time()
-                                    return nickname
+                async with self.session.get(url, headers=headers, timeout=5) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("success") and "data" in data:
+                            nickname = data["data"].get("name", "")
+                            if nickname:
+                                self.nick_cache[qq_number] = nickname
+                                self._nick_cache_time[qq_number] = time.time()
+                                return nickname
             except aiohttp.ClientError as e:
                 last_error = f"网络错误: {e}"
             except asyncio.TimeoutError:
@@ -143,19 +143,18 @@ class NodeTestPlugin(Star):
         filename = f"{sender_id}_{int(time.time())}.{ext}"
         cached_path = os.path.join(self.cache_dir, filename)
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=60) as resp:
-                    if resp.status != 200:
-                        self._log_debug(f"下载失败 HTTP {resp.status}")
-                        return None
-                    content = await resp.read()
-                    if len(content) == 0:
-                        self._log_debug("下载文件为空")
-                        return None
-                    with open(cached_path, 'wb') as f:
-                        f.write(content)
-                    self._log_debug(f"下载文件成功: {cached_path} ({len(content)} bytes)")
-                    return cached_path
+            async with self.session.get(url, timeout=60) as resp:
+                if resp.status != 200:
+                    self._log_debug(f"下载失败 HTTP {resp.status}")
+                    return None
+                content = await resp.read()
+                if len(content) == 0:
+                    self._log_debug("下载文件为空")
+                    return None
+                with open(cached_path, 'wb') as f:
+                    f.write(content)
+                self._log_debug(f"下载文件成功: {cached_path} ({len(content)} bytes)")
+                return cached_path
         except Exception as e:
             self._log_debug(f"下载文件异常: {e}")
             return None
@@ -482,7 +481,7 @@ class NodeTestPlugin(Star):
             await event.send(MessageChain([Plain(f"合并转发生成失败: {str(e)}，请重新发送媒体")]))
             return False
 
-    @event_message_type(EventMessageType.GROUP_MESSAGE | EventMessageType.PRIVATE_MESSAGE)
+    @event_message_type(EventMessageType.ALL)
     async def on_all_message(self, event: AstrMessageEvent):
         sender_id = event.get_sender_id()
         if sender_id not in self.admin_ids:
@@ -701,5 +700,6 @@ QQ号#昵称，如：
         yield event.plain_result(help_text)
 
     async def terminate(self):
+        await self.session.close()
         self._clear_cache(expired_only=False)
         pass
