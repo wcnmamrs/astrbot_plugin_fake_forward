@@ -446,7 +446,6 @@ class NodeTestPlugin(Star):
                                     nodes_list.append(Node(uin=int(seg['qq']), name=seg['nickname'], content=current_content))
                                     current_content = []
                                 original_name = ph.get('original_name', os.path.basename(path))
-                                # 只传 file 和 name，让框架自动处理路径
                                 self._log_debug(f"构造 File 组件: file={path}, name={original_name}")
                                 try:
                                     file_obj = File(file=path, name=original_name)
@@ -488,9 +487,6 @@ class NodeTestPlugin(Star):
                     Plain("自定义标题需要从私聊中转发才可生效 "),
                     Plain("从群转私聊 再从私聊转发无效")
                 ]))
-            # 延迟清理缓存（由启动时的过期清理负责）
-            if event.get_sender_id() in self.pending_requests:
-                del self.pending_requests[event.get_sender_id()]
             return True
         except Exception as e:
             self._log_debug(f"发送失败: {e}")
@@ -553,7 +549,10 @@ class NodeTestPlugin(Star):
                 elif not pending.get('ready', False):
                     await event.send(MessageChain([Plain("媒体尚未全部上传，请继续发送媒体")]))
                 else:
-                    await self._send_nodes(event, pending, preview=False)
+                    success = await self._send_nodes(event, pending, preview=False)
+                    if success:
+                        self._clear_cache(sender_id)
+                        del self.pending_requests[sender_id]
                 return
             else:
                 pass
