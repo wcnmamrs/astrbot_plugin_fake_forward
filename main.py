@@ -487,11 +487,12 @@ class NodeTestPlugin(Star):
             await event.send(MessageChain([nodes]))
             self._log_debug("合并转发发送成功")
 
+            # 判断是否为私聊：使用官方 API，私聊时 session_id 等于 sender_id
+            is_private = event.get_session_id() == event.get_sender_id()
             # 非预览、私聊、且第一个节点使用了自定义昵称 → 发送提醒
-            if not preview and first_seg and first_seg.get('is_custom_name', False):
-                if event.message_type == 'private':
-                    await event.send(MessageChain([Plain("自定义标题需要从私聊中转发才可生效")]))
-                    await event.send(MessageChain([Plain("从群转私聊 再从私聊转发无效")]))
+            if not preview and first_seg and first_seg.get('is_custom_name', False) and is_private:
+                await event.send(MessageChain([Plain("自定义标题需要从私聊中转发才可生效")]))
+                await event.send(MessageChain([Plain("从群转私聊 再从私聊转发无效")]))
 
             return True
         except Exception as e:
@@ -616,7 +617,6 @@ class NodeTestPlugin(Star):
                     fragments.append({'type': 'text', 'text': content[last_end:]})
 
                 nickname = custom_name if custom_name else await self.get_qq_nickname(qq)
-                # 标记是否使用了自定义昵称
                 is_custom = bool(custom_name)
                 if not placeholders:
                     seg = {
