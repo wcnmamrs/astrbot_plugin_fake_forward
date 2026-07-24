@@ -12,11 +12,6 @@
     "type": "string",
     "default": ""
   },
-  "default_summary": {
-    "description": "合并转发消息的默认标题（外部卡片），命令中可覆盖",
-    "type": "string",
-    "default": "群聊的聊天记录"
-  },
   "debug_mode": {
     "description": "开启后打印详细调试日志（用于排查问题）",
     "type": "bool",
