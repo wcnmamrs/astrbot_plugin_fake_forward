@@ -21,7 +21,6 @@ class NodeTestPlugin(Star):
 
         self.admin_ids = self.config.get("admin_ids", [])
         self.api_token = self.config.get("api_token", "")
-        self.default_summary = self.config.get("default_summary", "群聊的聊天记录")
         self.debug_mode = self.config.get("debug_mode", False)
         self.timeout = self.config.get("timeout", 120)
 
@@ -33,10 +32,8 @@ class NodeTestPlugin(Star):
         self.pending_requests = {}
         self.nick_cache = {}
 
-        # 使用 AstrBot 的临时目录，而非插件自有目录
         self.temp_dir = get_astrbot_temp_path()
         os.makedirs(self.temp_dir, exist_ok=True)
-        # 缓存目录仍然用插件下的，但用于复制文件，最终发送时使用 temp_dir
         self.cache_dir = os.path.join(os.path.dirname(__file__), "cache")
         os.makedirs(self.cache_dir, exist_ok=True)
 
@@ -475,18 +472,20 @@ class NodeTestPlugin(Star):
             await event.send(MessageChain([Plain("没有可显示的内容")]))
             return False
 
-        summary = pending.get('summary', self.default_summary)
+        # 根据第一个节点的昵称生成标题
+        first_seg = pending['segments'][0] if pending['segments'] else None
+        if first_seg and first_seg.get('nickname'):
+            summary = f"{first_seg['nickname']}的聊天记录"
+        else:
+            summary = "群聊的聊天记录"
+
         if preview:
             summary = f"[预览] {summary}"
+
         nodes = Nodes(nodes=nodes_list, summary=summary)
         try:
             await event.send(MessageChain([nodes]))
             self._log_debug("合并转发发送成功")
-            if not preview and summary != self.default_summary:
-                await event.send(MessageChain([
-                    Plain("自定义标题需要从私聊中转发才可生效 "),
-                    Plain("从群转私聊 再从私聊转发无效")
-                ]))
             return True
         except Exception as e:
             self._log_debug(f"发送失败: {e}")
@@ -562,26 +561,19 @@ class NodeTestPlugin(Star):
                 self._clear_cache(sender_id)
                 del self.pending_requests[sender_id]
 
+            # 直接提取参数，不再解析标题
             if message_text.startswith("/伪造消息"):
                 args = message_text[len("/伪造消息"):].lstrip()
             else:
                 args = re.sub(r'^伪造消息\s*', '', message_text)
 
             if not args:
-                await event.send(MessageChain([Plain("格式错误，请使用：伪造消息 [标题] QQ号#昵称 内容 | ...")]))
+                await event.send(MessageChain([Plain("格式错误，请使用：伪造消息 [QQ号#昵称] 内容 | [QQ号#昵称] 内容 | ...")]))
                 return
 
-            summary = self.default_summary
-            parts = args.split()
-            if parts and not re.match(r'^\d+$', parts[0]):
-                summary = parts[0]
-                args = ' '.join(parts[1:])
-                if not args:
-                    await event.send(MessageChain([Plain("格式错误：标题后缺少消息内容")]))
-                    return
-
+            parts = args.split('|')
             segments = []
-            for part in args.split('|'):
+            for part in parts:
                 part = part.strip()
                 if not part:
                     continue
@@ -643,10 +635,13 @@ class NodeTestPlugin(Star):
             if not has_placeholder:
                 nodes_list = await self._build_nodes(segments, preview=False)
                 if nodes_list:
+                    first_seg = segments[0] if segments else None
+                    if first_seg and first_seg.get('nickname'):
+                        summary = f"{first_seg['nickname']}的聊天记录"
+                    else:
+                        summary = "群聊的聊天记录"
                     nodes = Nodes(nodes=nodes_list, summary=summary)
                     await event.send(MessageChain([nodes]))
-                    if summary != self.default_summary:
-                        await event.send(MessageChain([Plain("自定义标题需要从私聊中转发才可生效\n从群转私聊 再从私聊转发无效")]))
                 else:
                     await event.send(MessageChain([Plain("未能生成节点（所有内容为空）")]))
                 return
@@ -655,7 +650,6 @@ class NodeTestPlugin(Star):
                 'segments': segments,
                 'timestamp': time.time(),
                 'fill_history': [],
-                'summary': summary,
                 'ready': False
             }
 
@@ -684,14 +678,8 @@ class NodeTestPlugin(Star):
 QQ号#昵称，如：
 伪造消息 123456#神人 你好
 
-【自定义标题（可选）】
-在命令最前面指定标题，将替换合并转发消息的外部卡片标题。
-默认标题是“群聊的聊天记录”，你可以改成任意文本，例如：
-  伪造消息 通知 123456#神人 你好
-注意：自定义标题需要从私聊中转发才可生效，群内直接发送无效。
-
 【媒体标记】
-[资源] 用于标记需要媒体（图片、视频或文件）的位置。
+[资源] 用于标记需要媒体（图片或视频）的位置。
 
 【媒体发送阶段】
 按顺序发送图片/视频，每发送一个显示进度。
@@ -700,6 +688,10 @@ QQ号#昵称，如：
   /伪造回退  - 撤销上一个媒体
   /伪造预览  - 预览当前已上传的媒体（未填充显示 [资源]）
   /伪造取消  - 取消当前任务
+
+【标题】
+合并转发消息的外部卡片标题由第一个发言者的昵称决定（格式：{昵称}的聊天记录）。
+你可以通过 #昵称 自定义昵称来改变标题。
 """
         yield event.plain_result(help_text)
 
