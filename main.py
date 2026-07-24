@@ -31,7 +31,7 @@ class NodeTestPlugin(Star):
         if not self.api_token:
             logger.warning("[伪造插件] 未配置 API Token，昵称获取将回退到“用户+QQ号”。")
 
-        self.pending_requests = {}
+        self.pending_requests = {}  # key: (sender_id, session_id)
         self.nick_cache = {}
         self._nick_cache_time = {}
 
@@ -61,6 +61,9 @@ class NodeTestPlugin(Star):
     def _log_debug(self, msg):
         if self.debug_mode:
             logger.info(f"[DEBUG] {msg}")
+
+    def _get_task_key(self, sender_id: str, session_id: str) -> tuple:
+        return (sender_id, session_id)
 
     def _clear_cache(self, sender_id: str = None, expired_only: bool = False):
         try:
@@ -244,8 +247,8 @@ class NodeTestPlugin(Star):
         self._log_debug(f"解析结果: {len(media_items)} 个媒体项")
         return media_items
 
-    async def _process_media_fill(self, event: AstrMessageEvent, sender_id: str):
-        pending = self.pending_requests.get(sender_id)
+    async def _process_media_fill(self, event: AstrMessageEvent, task_key: tuple):
+        pending = self.pending_requests.get(task_key)
         if not pending:
             self._log_debug("没有待处理的任务")
             return False
@@ -253,13 +256,13 @@ class NodeTestPlugin(Star):
         self._log_debug(f"处理媒体填充，任务剩余: {len(pending['segments'])} 个节点")
 
         if time.time() - pending['timestamp'] > self.timeout:
-            del self.pending_requests[sender_id]
+            del self.pending_requests[task_key]
+            sender_id = task_key[0]
             self._clear_cache(sender_id)
             await event.send(MessageChain([Plain(f"操作超时（{self.timeout}秒），取消伪造")]))
             return True
 
         if pending.get('ready', False):
-            # 检查当前消息是否包含媒体，如果没有则返回 False 让命令解析继续
             media_items_temp = await self.parse_message_components(event.message_obj)
             if not media_items_temp:
                 return False
@@ -290,7 +293,7 @@ class NodeTestPlugin(Star):
                         ext = match.group(1)
                 else:
                     ext = None
-                cached_path = await self._download_and_cache_url(original_path, sender_id, ext=ext)
+                cached_path = await self._download_and_cache_url(original_path, task_key[0], ext=ext)
                 if cached_path:
                     original_path = cached_path
                     path_type = 'file'
@@ -310,7 +313,7 @@ class NodeTestPlugin(Star):
                                 if not os.path.exists(original_path):
                                     self._log_debug(f"源文件不存在: {original_path}")
                                     if original_path.startswith(('http://', 'https://')):
-                                        cached = await self._download_and_cache_url(original_path, sender_id)
+                                        cached = await self._download_and_cache_url(original_path, task_key[0])
                                         if cached:
                                             original_path = cached
                                             path_type = 'file'
@@ -321,7 +324,7 @@ class NodeTestPlugin(Star):
                                         await event.send(MessageChain([Plain("媒体文件已失效，请重新发送")]))
                                         return True
                                 filename = os.path.basename(original_path)
-                                unique_name = f"{sender_id}_{int(time.time())}_{filename}"
+                                unique_name = f"{task_key[0]}_{int(time.time())}_{filename}"
                                 cached_path = os.path.join(self.cache_dir, unique_name)
                                 self._log_debug(f"目标缓存路径: {cached_path}")
                                 try:
@@ -479,24 +482,19 @@ class NodeTestPlugin(Star):
             await event.send(MessageChain([Plain(f"合并转发生成失败: {str(e)}，请重新发送媒体")]))
             return False
 
-    def _extract_command_args(self, message_text: str, command: str) -> str:
-        if message_text.startswith(f"/{command}"):
-            return message_text[len(f"/{command}"):].lstrip()
-        elif message_text.startswith(command):
-            return message_text[len(command):].lstrip()
-        return None
-
     @event_message_type(EventMessageType.GROUP_MESSAGE | EventMessageType.PRIVATE_MESSAGE)
     async def on_all_message(self, event: AstrMessageEvent):
         sender_id = event.get_sender_id()
         if sender_id not in self.admin_ids:
             return
 
+        session_id = event.get_session_id()
+        task_key = self._get_task_key(sender_id, session_id)
         message_text = event.message_str.strip()
         self._log_debug(f"收到消息: {message_text}")
 
-        if sender_id in self.pending_requests:
-            processed = await self._process_media_fill(event, sender_id)
+        if task_key in self.pending_requests:
+            processed = await self._process_media_fill(event, task_key)
             if processed:
                 return
 
@@ -506,8 +504,8 @@ class NodeTestPlugin(Star):
             sub_cmd = cmd[2:].strip()
             if sub_cmd == "取消":
                 self._log_debug("匹配到 /伪造取消")
-                if sender_id in self.pending_requests:
-                    del self.pending_requests[sender_id]
+                if task_key in self.pending_requests:
+                    del self.pending_requests[task_key]
                     self._clear_cache(sender_id)
                     await event.send(MessageChain([Plain("已取消")]))
                 else:
@@ -515,7 +513,7 @@ class NodeTestPlugin(Star):
                 return
             elif sub_cmd == "回退":
                 self._log_debug("匹配到 /伪造回退")
-                pending = self.pending_requests.get(sender_id)
+                pending = self.pending_requests.get(task_key)
                 if not pending or not pending['fill_history']:
                     await event.send(MessageChain([Plain("当前无媒体可回退")]))
                 else:
@@ -533,7 +531,7 @@ class NodeTestPlugin(Star):
                 return
             elif sub_cmd == "预览":
                 self._log_debug("匹配到 /伪造预览")
-                pending = self.pending_requests.get(sender_id)
+                pending = self.pending_requests.get(task_key)
                 if not pending:
                     await event.send(MessageChain([Plain("当前没有待处理的伪造消息")]))
                 else:
@@ -541,7 +539,7 @@ class NodeTestPlugin(Star):
                 return
             elif sub_cmd in ("确认", "发送"):
                 self._log_debug(f"匹配到 /伪造{sub_cmd}")
-                pending = self.pending_requests.get(sender_id)
+                pending = self.pending_requests.get(task_key)
                 if not pending:
                     await event.send(MessageChain([Plain("当前没有待处理的伪造消息")]))
                 elif not pending.get('ready', False):
@@ -550,7 +548,7 @@ class NodeTestPlugin(Star):
                     success = await self._send_nodes(event, pending, preview=False)
                     if success:
                         self._clear_cache(sender_id)
-                        del self.pending_requests[sender_id]
+                        del self.pending_requests[task_key]
                 return
             else:
                 pass
@@ -558,9 +556,9 @@ class NodeTestPlugin(Star):
         if not message_text.startswith("伪造消息") and not message_text.startswith("/伪造消息"):
             return
 
-        if sender_id in self.pending_requests:
+        if task_key in self.pending_requests:
             self._clear_cache(sender_id)
-            del self.pending_requests[sender_id]
+            del self.pending_requests[task_key]
             await event.send(MessageChain([Plain("已覆盖旧任务")]))
 
         if message_text.startswith("/伪造消息"):
@@ -569,7 +567,7 @@ class NodeTestPlugin(Star):
             args = message_text[len("伪造消息"):].lstrip()
 
         if not args:
-            await event.send(MessageChain([Plain("格式错误，请使用：伪造消息 [QQ号#昵称] 内容 | [QQ号#昵称] 内容 | ...")]))
+            await event.send(MessageChain([Plain("格式错误，请使用：伪造消息 QQ号#昵称 内容 | QQ号 内容 | ...")]))
             return
 
         parts = args.split('|')
@@ -653,7 +651,7 @@ class NodeTestPlugin(Star):
             await self._send_nodes(event, pending, preview=False)
             return
 
-        self.pending_requests[sender_id] = {
+        self.pending_requests[task_key] = {
             'segments': segments,
             'timestamp': time.time(),
             'fill_history': [],
