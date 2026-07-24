@@ -1,4 +1,5 @@
 from astrbot.api.all import *
+from astrbot.api import logger
 import re
 import aiohttp
 import asyncio
@@ -10,6 +11,7 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Video, Image, Plain, Nodes, Node, File
 from astrbot.api.event.filter import PermissionType
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 @register("fake_forward", "Jason.Joestar", "一个伪造转发消息的插件", "1.0.0", "插件仓库URL")
 class NodeTestPlugin(Star):
@@ -35,8 +37,10 @@ class NodeTestPlugin(Star):
 
         self.temp_dir = get_astrbot_temp_path()
         os.makedirs(self.temp_dir, exist_ok=True)
-        self.cache_dir = os.path.join(os.path.dirname(__file__), "cache")
-        os.makedirs(self.cache_dir, exist_ok=True)
+
+        plugin_data_dir = Path(get_astrbot_data_path()) / "plugin_data" / "fake_forward"
+        self.cache_dir = plugin_data_dir / "cache"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         now = time.time()
         for f in os.listdir(self.cache_dir):
@@ -84,7 +88,6 @@ class NodeTestPlugin(Star):
             self._log_debug(f"清理缓存失败: {e}")
 
     async def get_qq_nickname(self, qq_number):
-        # 缓存有效期为1小时
         if qq_number in self.nick_cache:
             if time.time() - self._nick_cache_time.get(qq_number, 0) < 3600:
                 self._log_debug(f"昵称缓存命中: {qq_number} -> {self.nick_cache[qq_number]}")
@@ -155,7 +158,6 @@ class NodeTestPlugin(Star):
             return None
 
     def _parse_media_common(self, comp, media_type):
-        """公共媒体解析逻辑，返回 (path, media_type, path_type, original_name)"""
         url = getattr(comp, 'url', None)
         if url:
             if url.startswith(('http://', 'https://')):
@@ -197,11 +199,11 @@ class NodeTestPlugin(Star):
                 if isinstance(comp, Video):
                     result = self._parse_media_common(comp, 'video')
                     if result:
-                        media_items.append(result + (None,))
+                        media_items.append(result)
                 elif isinstance(comp, Image):
                     result = self._parse_media_common(comp, 'image')
                     if result:
-                        media_items.append(result + (None,))
+                        media_items.append(result)
                 elif isinstance(comp, File):
                     original_name = getattr(comp, 'name', None)
                     if not original_name:
@@ -257,6 +259,10 @@ class NodeTestPlugin(Star):
             return True
 
         if pending.get('ready', False):
+            # 检查当前消息是否包含媒体，如果没有则返回 False 让命令解析继续
+            media_items_temp = await self.parse_message_components(event.message_obj)
+            if not media_items_temp:
+                return False
             await event.send(MessageChain([Plain("所有媒体已上传，请使用 /伪造确认 发送 或 /伪造取消 取消")]))
             return True
 
@@ -474,7 +480,6 @@ class NodeTestPlugin(Star):
             return False
 
     def _extract_command_args(self, message_text: str, command: str) -> str:
-        """提取命令参数，支持 /伪造消息 和 伪造消息 两种格式"""
         if message_text.startswith(f"/{command}"):
             return message_text[len(f"/{command}"):].lstrip()
         elif message_text.startswith(command):
@@ -490,13 +495,11 @@ class NodeTestPlugin(Star):
         message_text = event.message_str.strip()
         self._log_debug(f"收到消息: {message_text}")
 
-        # 如果有待处理任务，优先处理媒体填充
         if sender_id in self.pending_requests:
             processed = await self._process_media_fill(event, sender_id)
             if processed:
                 return
 
-        # 处理命令：必须精确匹配开头，避免误判
         cmd = message_text.lstrip("/").strip()
 
         if cmd.startswith("伪造"):
@@ -550,22 +553,16 @@ class NodeTestPlugin(Star):
                         del self.pending_requests[sender_id]
                 return
             else:
-                # 如果 sub_cmd 不是标准命令，但消息以 "伪造" 开头，可能是主命令
-                # 继续向下处理
                 pass
 
-        # 主命令：伪造消息 或 /伪造消息
         if not message_text.startswith("伪造消息") and not message_text.startswith("/伪造消息"):
-            # 但不以 "伪造消息" 开头，忽略
             return
 
-        # 覆盖旧任务（如果存在）
         if sender_id in self.pending_requests:
             self._clear_cache(sender_id)
             del self.pending_requests[sender_id]
             await event.send(MessageChain([Plain("已覆盖旧任务")]))
 
-        # 提取参数
         if message_text.startswith("/伪造消息"):
             args = message_text[len("/伪造消息"):].lstrip()
         else:
@@ -590,7 +587,6 @@ class NodeTestPlugin(Star):
             if not content:
                 continue
 
-            # QQ号有效性检查
             try:
                 qq_int = int(qq)
             except ValueError:
