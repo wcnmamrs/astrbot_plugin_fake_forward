@@ -486,6 +486,13 @@ class NodeTestPlugin(Star):
         try:
             await event.send(MessageChain([nodes]))
             self._log_debug("合并转发发送成功")
+
+            # 非预览、私聊、且第一个节点使用了自定义昵称 → 发送提醒
+            if not preview and first_seg and first_seg.get('is_custom_name', False):
+                if event.message_type == 'private':
+                    await event.send(MessageChain([Plain("自定义标题需要从私聊中转发才可生效")]))
+                    await event.send(MessageChain([Plain("从群转私聊 再从私聊转发无效")]))
+
             return True
         except Exception as e:
             self._log_debug(f"发送失败: {e}")
@@ -609,13 +616,16 @@ class NodeTestPlugin(Star):
                     fragments.append({'type': 'text', 'text': content[last_end:]})
 
                 nickname = custom_name if custom_name else await self.get_qq_nickname(qq)
+                # 标记是否使用了自定义昵称
+                is_custom = bool(custom_name)
                 if not placeholders:
                     seg = {
                         'qq': qq,
                         'nickname': nickname,
                         'clean_text': content,
                         'placeholders': [],
-                        'fragments': []
+                        'fragments': [],
+                        'is_custom_name': is_custom
                     }
                 else:
                     seg = {
@@ -623,7 +633,8 @@ class NodeTestPlugin(Star):
                         'nickname': nickname,
                         'clean_text': None,
                         'placeholders': placeholders,
-                        'fragments': fragments
+                        'fragments': fragments,
+                        'is_custom_name': is_custom
                     }
                 segments.append(seg)
 
@@ -633,17 +644,13 @@ class NodeTestPlugin(Star):
 
             has_placeholder = any(seg.get('placeholders') for seg in segments)
             if not has_placeholder:
-                nodes_list = await self._build_nodes(segments, preview=False)
-                if nodes_list:
-                    first_seg = segments[0] if segments else None
-                    if first_seg and first_seg.get('nickname'):
-                        summary = f"{first_seg['nickname']}的聊天记录"
-                    else:
-                        summary = "群聊的聊天记录"
-                    nodes = Nodes(nodes=nodes_list, summary=summary)
-                    await event.send(MessageChain([nodes]))
-                else:
-                    await event.send(MessageChain([Plain("未能生成节点（所有内容为空）")]))
+                # 无媒体，直接发送，通过 _send_nodes 统一处理
+                pending = {
+                    'segments': segments,
+                    'summary': "群聊的聊天记录",
+                    'ready': True
+                }
+                await self._send_nodes(event, pending, preview=False)
                 return
 
             self.pending_requests[sender_id] = {
