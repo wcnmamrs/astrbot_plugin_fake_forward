@@ -31,6 +31,7 @@ class NodeTestPlugin(Star):
 
         self.pending_requests = {}
         self.nick_cache = {}
+        self._nick_cache_time = {}
 
         self.temp_dir = get_astrbot_temp_path()
         os.makedirs(self.temp_dir, exist_ok=True)
@@ -83,17 +84,21 @@ class NodeTestPlugin(Star):
             self._log_debug(f"清理缓存失败: {e}")
 
     async def get_qq_nickname(self, qq_number):
+        # 缓存有效期为1小时
         if qq_number in self.nick_cache:
-            self._log_debug(f"昵称缓存命中: {qq_number} -> {self.nick_cache[qq_number]}")
-            return self.nick_cache[qq_number]
+            if time.time() - self._nick_cache_time.get(qq_number, 0) < 3600:
+                self._log_debug(f"昵称缓存命中: {qq_number} -> {self.nick_cache[qq_number]}")
+                return self.nick_cache[qq_number]
 
         if not self.api_token:
             nickname = f"用户{qq_number}"
             self.nick_cache[qq_number] = nickname
+            self._nick_cache_time[qq_number] = time.time()
             return nickname
 
         url = f"https://api.qzqi.com/api/v1/QQInfo?qq={qq_number}"
         headers = {"Authorization": f"Bearer {self.api_token}"}
+        last_error = None
         for attempt in range(1, 4):
             try:
                 async with aiohttp.ClientSession() as session:
@@ -104,12 +109,20 @@ class NodeTestPlugin(Star):
                                 nickname = data["data"].get("name", "")
                                 if nickname:
                                     self.nick_cache[qq_number] = nickname
+                                    self._nick_cache_time[qq_number] = time.time()
                                     return nickname
-            except Exception:
-                pass
-            await asyncio.sleep(0.5)
+            except aiohttp.ClientError as e:
+                last_error = f"网络错误: {e}"
+            except asyncio.TimeoutError:
+                last_error = "请求超时"
+            except Exception as e:
+                last_error = str(e)
+            await asyncio.sleep(0.5 * attempt)
         nickname = f"用户{qq_number}"
         self.nick_cache[qq_number] = nickname
+        self._nick_cache_time[qq_number] = time.time()
+        if last_error:
+            self._log_debug(f"昵称API失败: {last_error}，回退为 {nickname}")
         return nickname
 
     async def _download_and_cache_url(self, url: str, sender_id: str, ext: str = None) -> str:
@@ -141,6 +154,39 @@ class NodeTestPlugin(Star):
             self._log_debug(f"下载文件异常: {e}")
             return None
 
+    def _parse_media_common(self, comp, media_type):
+        """公共媒体解析逻辑，返回 (path, media_type, path_type, original_name)"""
+        url = getattr(comp, 'url', None)
+        if url:
+            if url.startswith(('http://', 'https://')):
+                return (url, media_type, 'url', None)
+            else:
+                if os.path.exists(url):
+                    return (url, media_type, 'file', None)
+                else:
+                    temp_dir = self.temp_dir
+                    full_path = os.path.join(temp_dir, os.path.basename(url))
+                    if os.path.exists(full_path):
+                        return (full_path, media_type, 'file', None)
+                    return (url, media_type, 'file', None)
+
+        file_path = getattr(comp, 'file', None)
+        if file_path:
+            if os.path.exists(file_path):
+                return (file_path, media_type, 'file', None)
+            else:
+                temp_dir = self.temp_dir
+                full_path = os.path.join(temp_dir, os.path.basename(file_path))
+                if os.path.exists(full_path):
+                    return (full_path, media_type, 'file', None)
+                return (file_path, media_type, 'file', None)
+
+        path_attr = getattr(comp, 'path', None)
+        if path_attr and os.path.exists(path_attr):
+            return (path_attr, media_type, 'file', None)
+
+        return None
+
     async def parse_message_components(self, message_obj):
         self._log_debug("开始解析消息组件")
         media_items = []
@@ -149,81 +195,13 @@ class NodeTestPlugin(Star):
             for idx, comp in enumerate(message_obj.message):
                 self._log_debug(f"组件{idx}: {type(comp).__name__}")
                 if isinstance(comp, Video):
-                    url = getattr(comp, 'url', None)
-                    if url:
-                        if url.startswith(('http://', 'https://')):
-                            self._log_debug(f"视频网络URL: {url[:80]}...")
-                            media_items.append((url, 'video', 'url', None))
-                        else:
-                            self._log_debug(f"视频'URL'实际是本地路径: {url}")
-                            if os.path.exists(url):
-                                media_items.append((url, 'video', 'file', None))
-                            else:
-                                temp_dir = self.temp_dir
-                                full_path = os.path.join(temp_dir, os.path.basename(url))
-                                if os.path.exists(full_path):
-                                    media_items.append((full_path, 'video', 'file', None))
-                                else:
-                                    media_items.append((url, 'video', 'file', None))
-                        continue
-                    file_path = getattr(comp, 'file', None)
-                    self._log_debug(f"视频文件路径: {file_path}")
-                    if file_path:
-                        if os.path.exists(file_path):
-                            media_items.append((file_path, 'video', 'file', None))
-                            self._log_debug(f"视频文件存在: {file_path}")
-                        else:
-                            temp_dir = self.temp_dir
-                            full_path = os.path.join(temp_dir, os.path.basename(file_path))
-                            self._log_debug(f"尝试补全路径: {full_path}")
-                            if os.path.exists(full_path):
-                                media_items.append((full_path, 'video', 'file', None))
-                                self._log_debug(f"补全路径存在: {full_path}")
-                            else:
-                                media_items.append((file_path, 'video', 'file', None))
-                                self._log_debug(f"文件不存在，记录原路径: {file_path}")
-                    path_attr = getattr(comp, 'path', None)
-                    if path_attr and os.path.exists(path_attr):
-                        media_items.append((path_attr, 'video', 'file', None))
-                        self._log_debug(f"通过 path 属性找到视频: {path_attr}")
+                    result = self._parse_media_common(comp, 'video')
+                    if result:
+                        media_items.append(result + (None,))
                 elif isinstance(comp, Image):
-                    url = getattr(comp, 'url', None)
-                    if url:
-                        if url.startswith(('http://', 'https://')):
-                            self._log_debug(f"图片网络URL: {url[:80]}...")
-                            media_items.append((url, 'image', 'url', None))
-                        else:
-                            self._log_debug(f"图片'URL'实际是本地路径: {url}")
-                            if os.path.exists(url):
-                                media_items.append((url, 'image', 'file', None))
-                            else:
-                                temp_dir = self.temp_dir
-                                full_path = os.path.join(temp_dir, os.path.basename(url))
-                                if os.path.exists(full_path):
-                                    media_items.append((full_path, 'image', 'file', None))
-                                else:
-                                    media_items.append((url, 'image', 'file', None))
-                        continue
-                    file_path = getattr(comp, 'file', None)
-                    self._log_debug(f"图片文件路径: {file_path}")
-                    if file_path:
-                        if os.path.exists(file_path):
-                            media_items.append((file_path, 'image', 'file', None))
-                            self._log_debug(f"图片文件存在: {file_path}")
-                        else:
-                            temp_dir = self.temp_dir
-                            full_path = os.path.join(temp_dir, os.path.basename(file_path))
-                            self._log_debug(f"尝试补全路径: {full_path}")
-                            if os.path.exists(full_path):
-                                media_items.append((full_path, 'image', 'file', None))
-                                self._log_debug(f"补全路径存在: {full_path}")
-                            else:
-                                media_items.append((file_path, 'image', 'file', None))
-                                self._log_debug(f"文件不存在，记录原路径: {file_path}")
-                    path_attr = getattr(comp, 'path', None)
-                    if path_attr and os.path.exists(path_attr):
-                        media_items.append((path_attr, 'image', 'file', None))
-                        self._log_debug(f"通过 path 属性找到图片: {path_attr}")
+                    result = self._parse_media_common(comp, 'image')
+                    if result:
+                        media_items.append(result + (None,))
                 elif isinstance(comp, File):
                     original_name = getattr(comp, 'name', None)
                     if not original_name:
@@ -231,14 +209,11 @@ class NodeTestPlugin(Star):
                         if file_path:
                             original_name = os.path.basename(file_path)
                     self._log_debug(f"文件原始名: {original_name}")
-
                     url = getattr(comp, 'url', None)
                     if url:
                         if url.startswith(('http://', 'https://')):
-                            self._log_debug(f"文件网络URL: {url[:80]}...")
                             media_items.append((url, 'file', 'url', original_name))
                         else:
-                            self._log_debug(f"文件'URL'实际是本地路径: {url}")
                             if os.path.exists(url) and os.path.getsize(url) > 0:
                                 media_items.append((url, 'file', 'file', original_name))
                             else:
@@ -248,26 +223,22 @@ class NodeTestPlugin(Star):
                                     media_items.append((full_path, 'file', 'file', original_name))
                                 else:
                                     media_items.append((url, 'file', 'file', original_name))
-                        continue
-                    file_path = getattr(comp, 'file_', None) or getattr(comp, 'file', None)
-                    self._log_debug(f"文件路径: {file_path}")
-                    if file_path:
-                        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                            media_items.append((file_path, 'file', 'file', original_name))
-                            self._log_debug(f"文件存在: {file_path} (大小: {os.path.getsize(file_path)})")
-                        else:
-                            temp_dir = self.temp_dir
-                            full_path = os.path.join(temp_dir, os.path.basename(file_path))
-                            if os.path.exists(full_path) and os.path.getsize(full_path) > 0:
-                                media_items.append((full_path, 'file', 'file', original_name))
-                                self._log_debug(f"补全路径存在: {full_path} (大小: {os.path.getsize(full_path)})")
-                            else:
+                    else:
+                        file_path = getattr(comp, 'file_', None) or getattr(comp, 'file', None)
+                        if file_path:
+                            if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                                 media_items.append((file_path, 'file', 'file', original_name))
-                                self._log_debug(f"文件不存在或为空，记录原路径: {file_path}")
-                    path_attr = getattr(comp, 'path', None)
-                    if path_attr and os.path.exists(path_attr) and os.path.getsize(path_attr) > 0:
-                        media_items.append((path_attr, 'file', 'file', original_name))
-                        self._log_debug(f"通过 path 属性找到文件: {path_attr} (大小: {os.path.getsize(path_attr)})")
+                            else:
+                                temp_dir = self.temp_dir
+                                full_path = os.path.join(temp_dir, os.path.basename(file_path))
+                                if os.path.exists(full_path) and os.path.getsize(full_path) > 0:
+                                    media_items.append((full_path, 'file', 'file', original_name))
+                                else:
+                                    media_items.append((file_path, 'file', 'file', original_name))
+                        else:
+                            path_attr = getattr(comp, 'path', None)
+                            if path_attr and os.path.exists(path_attr) and os.path.getsize(path_attr) > 0:
+                                media_items.append((path_attr, 'file', 'file', original_name))
         self._log_debug(f"解析结果: {len(media_items)} 个媒体项")
         return media_items
 
@@ -426,6 +397,11 @@ class NodeTestPlugin(Star):
                             actual = ph['actual_type']
                             path = ph['path']
                             path_type = ph['path_type']
+                            if not os.path.exists(path):
+                                self._log_debug(f"文件不存在，跳过: {path}")
+                                if preview:
+                                    current_content.append(Plain("[资源]"))
+                                continue
                             if actual == 'video':
                                 if current_content:
                                     nodes_list.append(Node(uin=int(seg['qq']), name=seg['nickname'], content=current_content))
@@ -472,7 +448,6 @@ class NodeTestPlugin(Star):
             await event.send(MessageChain([Plain("没有可显示的内容")]))
             return False
 
-        # 根据第一个节点的昵称生成标题
         first_seg = pending['segments'][0] if pending['segments'] else None
         if first_seg and first_seg.get('nickname'):
             summary = f"{first_seg['nickname']}的聊天记录"
@@ -487,9 +462,7 @@ class NodeTestPlugin(Star):
             await event.send(MessageChain([nodes]))
             self._log_debug("合并转发发送成功")
 
-            # 判断是否为私聊：使用官方 API，私聊时 session_id 等于 sender_id
             is_private = event.get_session_id() == event.get_sender_id()
-            # 非预览、私聊、且第一个节点使用了自定义昵称 → 发送提醒
             if not preview and first_seg and first_seg.get('is_custom_name', False) and is_private:
                 await event.send(MessageChain([Plain("自定义标题需要从私聊中转发才可生效")]))
                 await event.send(MessageChain([Plain("从群转私聊 再从私聊转发无效")]))
@@ -500,6 +473,14 @@ class NodeTestPlugin(Star):
             await event.send(MessageChain([Plain(f"合并转发生成失败: {str(e)}，请重新发送媒体")]))
             return False
 
+    def _extract_command_args(self, message_text: str, command: str) -> str:
+        """提取命令参数，支持 /伪造消息 和 伪造消息 两种格式"""
+        if message_text.startswith(f"/{command}"):
+            return message_text[len(f"/{command}"):].lstrip()
+        elif message_text.startswith(command):
+            return message_text[len(command):].lstrip()
+        return None
+
     @event_message_type(EventMessageType.GROUP_MESSAGE | EventMessageType.PRIVATE_MESSAGE)
     async def on_all_message(self, event: AstrMessageEvent):
         sender_id = event.get_sender_id()
@@ -509,6 +490,13 @@ class NodeTestPlugin(Star):
         message_text = event.message_str.strip()
         self._log_debug(f"收到消息: {message_text}")
 
+        # 如果有待处理任务，优先处理媒体填充
+        if sender_id in self.pending_requests:
+            processed = await self._process_media_fill(event, sender_id)
+            if processed:
+                return
+
+        # 处理命令：必须精确匹配开头，避免误判
         cmd = message_text.lstrip("/").strip()
 
         if cmd.startswith("伪造"):
@@ -562,113 +550,123 @@ class NodeTestPlugin(Star):
                         del self.pending_requests[sender_id]
                 return
             else:
+                # 如果 sub_cmd 不是标准命令，但消息以 "伪造" 开头，可能是主命令
+                # 继续向下处理
                 pass
 
-        if re.search(r'伪造消息', message_text):
-            if sender_id in self.pending_requests:
-                self._clear_cache(sender_id)
-                del self.pending_requests[sender_id]
-
-            # 直接提取参数，不再解析标题
-            if message_text.startswith("/伪造消息"):
-                args = message_text[len("/伪造消息"):].lstrip()
-            else:
-                args = re.sub(r'^伪造消息\s*', '', message_text)
-
-            if not args:
-                await event.send(MessageChain([Plain("格式错误，请使用：伪造消息 [QQ号#昵称] 内容 | [QQ号#昵称] 内容 | ...")]))
-                return
-
-            parts = args.split('|')
-            segments = []
-            for part in parts:
-                part = part.strip()
-                if not part:
-                    continue
-                match = re.match(r'^\s*(\d+)(?:#\s*([^#]+))?\s+(.*)', part)
-                if not match:
-                    continue
-                qq = match.group(1)
-                custom_name = match.group(2)
-                content = match.group(3).strip()
-                if not content:
-                    continue
-
-                pattern = r'\[资源\]'
-                matches = list(re.finditer(pattern, content))
-                fragments = []
-                placeholders = []
-                last_end = 0
-                for idx, m in enumerate(matches):
-                    if m.start() > last_end:
-                        fragments.append({'type': 'text', 'text': content[last_end:m.start()]})
-                    ph = {
-                        'filled': False,
-                        'path': None,
-                        'path_type': None,
-                        'actual_type': None,
-                        'original_name': None
-                    }
-                    ph_idx = len(placeholders)
-                    placeholders.append(ph)
-                    fragments.append({'type': 'placeholder', 'ph_idx': ph_idx})
-                    last_end = m.end()
-                if last_end < len(content):
-                    fragments.append({'type': 'text', 'text': content[last_end:]})
-
-                nickname = custom_name if custom_name else await self.get_qq_nickname(qq)
-                is_custom = bool(custom_name)
-                if not placeholders:
-                    seg = {
-                        'qq': qq,
-                        'nickname': nickname,
-                        'clean_text': content,
-                        'placeholders': [],
-                        'fragments': [],
-                        'is_custom_name': is_custom
-                    }
-                else:
-                    seg = {
-                        'qq': qq,
-                        'nickname': nickname,
-                        'clean_text': None,
-                        'placeholders': placeholders,
-                        'fragments': fragments,
-                        'is_custom_name': is_custom
-                    }
-                segments.append(seg)
-
-            if not segments:
-                await event.send(MessageChain([Plain("未能解析出任何有效的消息节点")]))
-                return
-
-            has_placeholder = any(seg.get('placeholders') for seg in segments)
-            if not has_placeholder:
-                # 无媒体，直接发送，通过 _send_nodes 统一处理
-                pending = {
-                    'segments': segments,
-                    'summary': "群聊的聊天记录",
-                    'ready': True
-                }
-                await self._send_nodes(event, pending, preview=False)
-                return
-
-            self.pending_requests[sender_id] = {
-                'segments': segments,
-                'timestamp': time.time(),
-                'fill_history': [],
-                'ready': False
-            }
-
-            total = sum(1 for seg in segments for ph in seg['placeholders'])
-            qq_list = [seg['qq'] for seg in segments if seg['placeholders']]
-            await event.send(MessageChain([Plain(f"开始生成\n需要媒体的节点：{', '.join(qq_list)}\n共 {total} 个媒体。输入 /伪造回退 撤销上一个，/伪造预览 预览，全部上传后输入 /伪造确认 发送")]))
+        # 主命令：伪造消息 或 /伪造消息
+        if not message_text.startswith("伪造消息") and not message_text.startswith("/伪造消息"):
+            # 但不以 "伪造消息" 开头，忽略
             return
 
+        # 覆盖旧任务（如果存在）
         if sender_id in self.pending_requests:
-            processed = await self._process_media_fill(event, sender_id)
-            if processed:
+            self._clear_cache(sender_id)
+            del self.pending_requests[sender_id]
+            await event.send(MessageChain([Plain("已覆盖旧任务")]))
+
+        # 提取参数
+        if message_text.startswith("/伪造消息"):
+            args = message_text[len("/伪造消息"):].lstrip()
+        else:
+            args = message_text[len("伪造消息"):].lstrip()
+
+        if not args:
+            await event.send(MessageChain([Plain("格式错误，请使用：伪造消息 [QQ号#昵称] 内容 | [QQ号#昵称] 内容 | ...")]))
+            return
+
+        parts = args.split('|')
+        segments = []
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            match = re.match(r'^\s*(\d+)(?:#\s*([^#]+))?\s+(.*)', part)
+            if not match:
+                continue
+            qq = match.group(1)
+            custom_name = match.group(2)
+            content = match.group(3).strip()
+            if not content:
+                continue
+
+            # QQ号有效性检查
+            try:
+                qq_int = int(qq)
+            except ValueError:
+                await event.send(MessageChain([Plain(f"QQ号 '{qq}' 格式错误，请输入纯数字")]))
                 return
+
+            pattern = r'\[资源\]'
+            matches = list(re.finditer(pattern, content))
+            fragments = []
+            placeholders = []
+            last_end = 0
+            for idx, m in enumerate(matches):
+                if m.start() > last_end:
+                    fragments.append({'type': 'text', 'text': content[last_end:m.start()]})
+                ph = {
+                    'filled': False,
+                    'path': None,
+                    'path_type': None,
+                    'actual_type': None,
+                    'original_name': None
+                }
+                ph_idx = len(placeholders)
+                placeholders.append(ph)
+                fragments.append({'type': 'placeholder', 'ph_idx': ph_idx})
+                last_end = m.end()
+            if last_end < len(content):
+                fragments.append({'type': 'text', 'text': content[last_end:]})
+
+            nickname = custom_name if custom_name else await self.get_qq_nickname(qq)
+            is_custom = bool(custom_name)
+            if not placeholders:
+                seg = {
+                    'qq': qq,
+                    'qq_int': qq_int,
+                    'nickname': nickname,
+                    'clean_text': content,
+                    'placeholders': [],
+                    'fragments': [],
+                    'is_custom_name': is_custom
+                }
+            else:
+                seg = {
+                    'qq': qq,
+                    'qq_int': qq_int,
+                    'nickname': nickname,
+                    'clean_text': None,
+                    'placeholders': placeholders,
+                    'fragments': fragments,
+                    'is_custom_name': is_custom
+                }
+            segments.append(seg)
+
+        if not segments:
+            await event.send(MessageChain([Plain("未能解析出任何有效的消息节点")]))
+            return
+
+        has_placeholder = any(seg.get('placeholders') for seg in segments)
+        if not has_placeholder:
+            pending = {
+                'segments': segments,
+                'summary': "群聊的聊天记录",
+                'ready': True
+            }
+            await self._send_nodes(event, pending, preview=False)
+            return
+
+        self.pending_requests[sender_id] = {
+            'segments': segments,
+            'timestamp': time.time(),
+            'fill_history': [],
+            'ready': False
+        }
+
+        total = sum(1 for seg in segments for ph in seg['placeholders'])
+        qq_list = [seg['qq'] for seg in segments if seg['placeholders']]
+        await event.send(MessageChain([Plain(f"开始生成\n需要媒体的节点：{', '.join(qq_list)}\n共 {total} 个媒体。输入 /伪造回退 撤销上一个，/伪造预览 预览，全部上传后输入 /伪造确认 发送")]))
 
     @filter.command("伪造帮助", permission=PermissionType.ADMIN)
     async def help_command(self, event: AstrMessageEvent):
