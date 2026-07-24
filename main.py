@@ -266,7 +266,7 @@ class NodeTestPlugin(Star):
             media_items_temp = await self.parse_message_components(event.message_obj)
             if not media_items_temp:
                 return False
-            await event.send(MessageChain([Plain("所有媒体已上传，请使用 /伪造确认 发送 或 /伪造取消 取消")]))
+            await event.send(MessageChain([Plain("所有媒体已上传，请使用 伪造确认 发送 或 伪造取消 取消")]))
             return True
 
         media_items = await self.parse_message_components(event.message_obj)
@@ -380,7 +380,7 @@ class NodeTestPlugin(Star):
         if all_filled_after:
             self._log_debug("所有占位符已填充，进入待确认状态")
             pending['ready'] = True
-            await event.send(MessageChain([Plain("所有节点已填充 输入 /伪造确认 发送合并转发，或 /伪造取消 取消任务")]))
+            await event.send(MessageChain([Plain("所有节点已填充 输入 伪造确认 发送合并转发，或 伪造取消 取消任务")]))
             return True
         else:
             self._log_debug("还有占位符未填充，继续等待")
@@ -493,174 +493,180 @@ class NodeTestPlugin(Star):
         message_text = event.message_str.strip()
         self._log_debug(f"收到消息: {message_text}")
 
+        # 提取命令（支持带斜杠和不带斜杠）
+        raw_cmd = message_text.lstrip("/").strip()
+        cmd = raw_cmd  # 去除前导斜杠后的命令
+
+        # 定义支持的所有子命令（不含前缀“伪造”）
+        sub_commands = ["取消", "回退", "预览", "确认", "发送"]
+
+        # 1. 处理子命令
+        for sub in sub_commands:
+            if cmd == f"伪造{sub}":
+                if sub == "取消":
+                    self._log_debug("匹配到 伪造取消")
+                    if task_key in self.pending_requests:
+                        del self.pending_requests[task_key]
+                        self._clear_cache(sender_id)
+                        await event.send(MessageChain([Plain("已取消")]))
+                    else:
+                        await event.send(MessageChain([Plain("当前没有待处理的伪造消息")]))
+                    return
+                elif sub == "回退":
+                    self._log_debug("匹配到 伪造回退")
+                    pending = self.pending_requests.get(task_key)
+                    if not pending or not pending['fill_history']:
+                        await event.send(MessageChain([Plain("当前无媒体可回退")]))
+                    else:
+                        pending['ready'] = False
+                        seg_idx, ph_idx = pending['fill_history'].pop()
+                        ph = pending['segments'][seg_idx]['placeholders'][ph_idx]
+                        ph['filled'] = False
+                        ph['path'] = None
+                        ph['path_type'] = None
+                        ph['actual_type'] = None
+                        ph['original_name'] = None
+                        filled_count = len(pending['fill_history'])
+                        total = sum(1 for s in pending['segments'] for p in s['placeholders'])
+                        await event.send(MessageChain([Plain(f"已回退到 {filled_count}/{total}")]))
+                    return
+                elif sub == "预览":
+                    self._log_debug("匹配到 伪造预览")
+                    pending = self.pending_requests.get(task_key)
+                    if not pending:
+                        await event.send(MessageChain([Plain("当前没有待处理的伪造消息")]))
+                    else:
+                        await self._send_nodes(event, pending, preview=True)
+                    return
+                elif sub in ("确认", "发送"):
+                    self._log_debug(f"匹配到 伪造{sub}")
+                    pending = self.pending_requests.get(task_key)
+                    if not pending:
+                        await event.send(MessageChain([Plain("当前没有待处理的伪造消息")]))
+                    elif not pending.get('ready', False):
+                        await event.send(MessageChain([Plain("媒体尚未全部上传，请继续发送媒体")]))
+                    else:
+                        success = await self._send_nodes(event, pending, preview=False)
+                        if success:
+                            self._clear_cache(sender_id)
+                            del self.pending_requests[task_key]
+                    return
+
+        # 2. 处理主命令：伪造消息（支持带斜杠和不带斜杠）
+        if message_text.startswith("伪造消息") or message_text.startswith("/伪造消息"):
+            if task_key in self.pending_requests:
+                self._clear_cache(sender_id)
+                del self.pending_requests[task_key]
+                await event.send(MessageChain([Plain("已覆盖旧任务")]))
+
+            # 提取参数
+            if message_text.startswith("/伪造消息"):
+                args = message_text[len("/伪造消息"):].lstrip()
+            else:
+                args = message_text[len("伪造消息"):].lstrip()
+
+            if not args:
+                await event.send(MessageChain([Plain("格式错误，请使用：伪造消息 QQ号#昵称 内容 | QQ号 内容 | ...")]))
+                return
+
+            parts = args.split('|')
+            segments = []
+            for part in parts:
+                part = part.strip()
+                if not part:
+                    continue
+                match = re.match(r'^\s*(\d+)(?:#\s*([^#]+))?\s+(.*)', part)
+                if not match:
+                    continue
+                qq = match.group(1)
+                custom_name = match.group(2)
+                content = match.group(3).strip()
+                if not content:
+                    continue
+
+                try:
+                    qq_int = int(qq)
+                except ValueError:
+                    await event.send(MessageChain([Plain(f"QQ号 '{qq}' 格式错误，请输入纯数字")]))
+                    return
+
+                pattern = r'\[资源\]'
+                matches = list(re.finditer(pattern, content))
+                fragments = []
+                placeholders = []
+                last_end = 0
+                for idx, m in enumerate(matches):
+                    if m.start() > last_end:
+                        fragments.append({'type': 'text', 'text': content[last_end:m.start()]})
+                    ph = {
+                        'filled': False,
+                        'path': None,
+                        'path_type': None,
+                        'actual_type': None,
+                        'original_name': None
+                    }
+                    ph_idx = len(placeholders)
+                    placeholders.append(ph)
+                    fragments.append({'type': 'placeholder', 'ph_idx': ph_idx})
+                    last_end = m.end()
+                if last_end < len(content):
+                    fragments.append({'type': 'text', 'text': content[last_end:]})
+
+                nickname = custom_name if custom_name else await self.get_qq_nickname(qq)
+                is_custom = bool(custom_name)
+                if not placeholders:
+                    seg = {
+                        'qq': qq,
+                        'qq_int': qq_int,
+                        'nickname': nickname,
+                        'clean_text': content,
+                        'placeholders': [],
+                        'fragments': [],
+                        'is_custom_name': is_custom
+                    }
+                else:
+                    seg = {
+                        'qq': qq,
+                        'qq_int': qq_int,
+                        'nickname': nickname,
+                        'clean_text': None,
+                        'placeholders': placeholders,
+                        'fragments': fragments,
+                        'is_custom_name': is_custom
+                    }
+                segments.append(seg)
+
+            if not segments:
+                await event.send(MessageChain([Plain("未能解析出任何有效的消息节点")]))
+                return
+
+            has_placeholder = any(seg.get('placeholders') for seg in segments)
+            if not has_placeholder:
+                pending = {
+                    'segments': segments,
+                    'summary': "群聊的聊天记录",
+                    'ready': True
+                }
+                await self._send_nodes(event, pending, preview=False)
+                return
+
+            self.pending_requests[task_key] = {
+                'segments': segments,
+                'timestamp': time.time(),
+                'fill_history': [],
+                'ready': False
+            }
+
+            total = sum(1 for seg in segments for ph in seg['placeholders'])
+            qq_list = [seg['qq'] for seg in segments if seg['placeholders']]
+            await event.send(MessageChain([Plain(f"开始生成\n需要媒体的节点：{', '.join(qq_list)}\n共 {total} 个媒体。输入 伪造回退 撤销上一个，伪造预览 预览，全部上传后输入 伪造确认 发送")]))
+            return
+
+        # 3. 不是命令，若存在 pending 任务则尝试作为媒体填充
         if task_key in self.pending_requests:
             processed = await self._process_media_fill(event, task_key)
             if processed:
                 return
-
-        cmd = message_text.lstrip("/").strip()
-
-        if cmd.startswith("伪造"):
-            sub_cmd = cmd[2:].strip()
-            if sub_cmd == "取消":
-                self._log_debug("匹配到 /伪造取消")
-                if task_key in self.pending_requests:
-                    del self.pending_requests[task_key]
-                    self._clear_cache(sender_id)
-                    await event.send(MessageChain([Plain("已取消")]))
-                else:
-                    await event.send(MessageChain([Plain("当前没有待处理的伪造消息")]))
-                return
-            elif sub_cmd == "回退":
-                self._log_debug("匹配到 /伪造回退")
-                pending = self.pending_requests.get(task_key)
-                if not pending or not pending['fill_history']:
-                    await event.send(MessageChain([Plain("当前无媒体可回退")]))
-                else:
-                    pending['ready'] = False
-                    seg_idx, ph_idx = pending['fill_history'].pop()
-                    ph = pending['segments'][seg_idx]['placeholders'][ph_idx]
-                    ph['filled'] = False
-                    ph['path'] = None
-                    ph['path_type'] = None
-                    ph['actual_type'] = None
-                    ph['original_name'] = None
-                    filled_count = len(pending['fill_history'])
-                    total = sum(1 for s in pending['segments'] for p in s['placeholders'])
-                    await event.send(MessageChain([Plain(f"已回退到 {filled_count}/{total}")]))
-                return
-            elif sub_cmd == "预览":
-                self._log_debug("匹配到 /伪造预览")
-                pending = self.pending_requests.get(task_key)
-                if not pending:
-                    await event.send(MessageChain([Plain("当前没有待处理的伪造消息")]))
-                else:
-                    await self._send_nodes(event, pending, preview=True)
-                return
-            elif sub_cmd in ("确认", "发送"):
-                self._log_debug(f"匹配到 /伪造{sub_cmd}")
-                pending = self.pending_requests.get(task_key)
-                if not pending:
-                    await event.send(MessageChain([Plain("当前没有待处理的伪造消息")]))
-                elif not pending.get('ready', False):
-                    await event.send(MessageChain([Plain("媒体尚未全部上传，请继续发送媒体")]))
-                else:
-                    success = await self._send_nodes(event, pending, preview=False)
-                    if success:
-                        self._clear_cache(sender_id)
-                        del self.pending_requests[task_key]
-                return
-            else:
-                pass
-
-        if not message_text.startswith("伪造消息") and not message_text.startswith("/伪造消息"):
-            return
-
-        if task_key in self.pending_requests:
-            self._clear_cache(sender_id)
-            del self.pending_requests[task_key]
-            await event.send(MessageChain([Plain("已覆盖旧任务")]))
-
-        if message_text.startswith("/伪造消息"):
-            args = message_text[len("/伪造消息"):].lstrip()
-        else:
-            args = message_text[len("伪造消息"):].lstrip()
-
-        if not args:
-            await event.send(MessageChain([Plain("格式错误，请使用：伪造消息 QQ号#昵称 内容 | QQ号 内容 | ...")]))
-            return
-
-        parts = args.split('|')
-        segments = []
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
-            match = re.match(r'^\s*(\d+)(?:#\s*([^#]+))?\s+(.*)', part)
-            if not match:
-                continue
-            qq = match.group(1)
-            custom_name = match.group(2)
-            content = match.group(3).strip()
-            if not content:
-                continue
-
-            try:
-                qq_int = int(qq)
-            except ValueError:
-                await event.send(MessageChain([Plain(f"QQ号 '{qq}' 格式错误，请输入纯数字")]))
-                return
-
-            pattern = r'\[资源\]'
-            matches = list(re.finditer(pattern, content))
-            fragments = []
-            placeholders = []
-            last_end = 0
-            for idx, m in enumerate(matches):
-                if m.start() > last_end:
-                    fragments.append({'type': 'text', 'text': content[last_end:m.start()]})
-                ph = {
-                    'filled': False,
-                    'path': None,
-                    'path_type': None,
-                    'actual_type': None,
-                    'original_name': None
-                }
-                ph_idx = len(placeholders)
-                placeholders.append(ph)
-                fragments.append({'type': 'placeholder', 'ph_idx': ph_idx})
-                last_end = m.end()
-            if last_end < len(content):
-                fragments.append({'type': 'text', 'text': content[last_end:]})
-
-            nickname = custom_name if custom_name else await self.get_qq_nickname(qq)
-            is_custom = bool(custom_name)
-            if not placeholders:
-                seg = {
-                    'qq': qq,
-                    'qq_int': qq_int,
-                    'nickname': nickname,
-                    'clean_text': content,
-                    'placeholders': [],
-                    'fragments': [],
-                    'is_custom_name': is_custom
-                }
-            else:
-                seg = {
-                    'qq': qq,
-                    'qq_int': qq_int,
-                    'nickname': nickname,
-                    'clean_text': None,
-                    'placeholders': placeholders,
-                    'fragments': fragments,
-                    'is_custom_name': is_custom
-                }
-            segments.append(seg)
-
-        if not segments:
-            await event.send(MessageChain([Plain("未能解析出任何有效的消息节点")]))
-            return
-
-        has_placeholder = any(seg.get('placeholders') for seg in segments)
-        if not has_placeholder:
-            pending = {
-                'segments': segments,
-                'summary': "群聊的聊天记录",
-                'ready': True
-            }
-            await self._send_nodes(event, pending, preview=False)
-            return
-
-        self.pending_requests[task_key] = {
-            'segments': segments,
-            'timestamp': time.time(),
-            'fill_history': [],
-            'ready': False
-        }
-
-        total = sum(1 for seg in segments for ph in seg['placeholders'])
-        qq_list = [seg['qq'] for seg in segments if seg['placeholders']]
-        await event.send(MessageChain([Plain(f"开始生成\n需要媒体的节点：{', '.join(qq_list)}\n共 {total} 个媒体。输入 /伪造回退 撤销上一个，/伪造预览 预览，全部上传后输入 /伪造确认 发送")]))
 
     @filter.command("伪造帮助", permission=PermissionType.ADMIN)
     async def help_command(self, event: AstrMessageEvent):
@@ -682,11 +688,11 @@ QQ号#昵称，如：
 
 【媒体发送阶段】
 按顺序发送图片/视频，每发送一个显示进度。
-全部上传后，输入 /伪造确认 发送合并转发。
+全部上传后，输入 伪造确认 发送合并转发。
 其他命令：
-  /伪造回退  - 撤销上一个媒体
-  /伪造预览  - 预览当前已上传的媒体（未填充显示 [资源]）
-  /伪造取消  - 取消当前任务
+  伪造回退  - 撤销上一个媒体
+  伪造预览  - 预览当前已上传的媒体（未填充显示 [资源]）
+  伪造取消  - 取消当前任务
 
 【标题】
 合并转发消息的外部卡片标题由第一个发言者的昵称决定（格式：{昵称}的聊天记录）。
